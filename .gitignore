@@ -9,3 +9,5 @@ env/
 
 # Large datasets (if they exceed GitHub's limits)
 *.csv
+
+.DS_Store
