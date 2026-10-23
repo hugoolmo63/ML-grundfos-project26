@@ -1,0 +1,11 @@
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Virtual environment
+venv/
+env/
+
+# Large datasets (if they exceed GitHub's limits)
+*.csv
