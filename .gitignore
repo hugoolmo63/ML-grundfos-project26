@@ -1,13 +1,14 @@
-# Python / Jupyter
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+
+# Python & Jupyter clutter
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Virtual environment
+# Virtual environment folders
 venv/
 env/
-
-# Large datasets (if they exceed GitHub's limits)
-*.csv
-
-.DS_Store
+.venv/
