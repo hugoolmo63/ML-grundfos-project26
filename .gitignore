@@ -11,4 +11,5 @@ __pycache__/
 # Virtual environment folders
 venv/
 env/
-.venv/
+.venv/.DS_Store
+data/.DS_Store
