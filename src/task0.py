@@ -10,7 +10,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Main paths:
-data_p = Path(__file__).resolve().parent.parent / 'data'
+root_p = Path(__file__).resolve().parent.parent
+data_p = root_p / 'data'
+fig_p = root_p / 'report' / 'figures'
+fig_p.mkdir(parents=True, exist_ok=True)
 
 case1_p = data_p/'case1'
 test1_p = case1_p/'test1.csv'
@@ -102,27 +105,48 @@ def stepwise_selection(estimator, direction, criterion):
     return selected
 
 
-# Elbow: follow the full greedy forward path and detect the bend:
-def elbow_selection(estimator):
+# Full greedy forward path: yields both Forward CV RMSE and Elbow selections
+def forward_and_elbow_selection(estimator):
     selected = []
     errors = []
     while len(selected) < len(X.columns):
         remaining = [name for name in X.columns if name not in selected]
-        name = min(remaining, key=lambda feature: selection_score(selected + [feature], estimator, 'CV RMSE'))
-        selected.append(name)
-        errors.append(selection_score(selected, estimator, 'CV RMSE'))
+        scored = [
+            (selection_score(selected + [name], estimator, 'CV RMSE'), name)
+            for name in remaining
+        ]
+        best_step_rmse, best_name = min(scored)
+        selected.append(best_name)
+        errors.append(best_step_rmse)
+
+    # 1. Forward CV RMSE: stop right before the first step where error stops improving
+    stop_idx = len(errors)
+    for i in range(1, len(errors)):
+        if errors[i] >= errors[i - 1]:
+            stop_idx = i
+            break
+    forward_features = selected[:stop_idx]
+    forward_rmse = errors[stop_idx - 1]
+
+    # 2. Elbow: detect the bend along the full greedy forward path
     knee = KneeLocator(range(1, len(errors) + 1), errors,
                        curve='convex', direction='decreasing')
-    count = int(knee.knee) if knee.knee is not None else int(np.argmin(errors)) + 1
-    return selected[:count]
+    elbow_count = int(knee.knee) if knee.knee is not None else int(np.argmin(errors)) + 1
+    elbow_features = selected[:elbow_count]
+    elbow_rmse = errors[elbow_count - 1]
+
+    return (forward_features, forward_rmse), (elbow_features, elbow_rmse)
+
 
 # Feature selection:
 lasso_models = {}
 selection_results = []
 for model_name, fit_intercept in [('Original', True), ('Zero intercept', False)]:
     estimator = LinearRegression(fit_intercept=fit_intercept)
-    features, rmse = forward_selection(estimator)
-    selection_results.append((model_name, 'Forward CV RMSE', features, rmse))
+
+    (fwd_features, fwd_rmse), (elbow_features, elbow_rmse) = forward_and_elbow_selection(estimator)
+    selection_results.append((model_name, 'Forward CV RMSE', fwd_features, fwd_rmse))
+    selection_results.append((model_name, 'Elbow', elbow_features, elbow_rmse))
 
     for criterion in ['CV RMSE', 'AIC', 'BIC']:
         for direction in ['forward', 'backward']:
@@ -132,10 +156,6 @@ for model_name, fit_intercept in [('Original', True), ('Zero intercept', False)]
             rmse = selection_score(features, estimator, 'CV RMSE')
             selection_results.append((model_name, f'{direction.title()} {criterion}', features, rmse))
 
-    features = elbow_selection(estimator)
-    selection_results.append((model_name, 'Elbow', features,
-                              selection_score(features, estimator, 'CV RMSE')))
-
     # Standardize predictors before Lasso; do not center for zero-intercept fits.
     lasso = make_pipeline(
         StandardScaler(with_mean=fit_intercept),
@@ -144,9 +164,9 @@ for model_name, fit_intercept in [('Original', True), ('Zero intercept', False)]
     lasso.fit(X, y)
     lasso_models[model_name] = lasso
     features = list(X.columns[np.abs(lasso.named_steps['lassocv'].coef_) > 1e-8])
-    rmse = np.sqrt(np.min(np.mean(lasso.named_steps['lassocv'].mse_path_, axis=1)))
-    selection_results.append((model_name, 'LassoCV', features, rmse))
-
+    if features:
+        rmse = np.sqrt(np.min(np.mean(lasso.named_steps['lassocv'].mse_path_, axis=1)))
+        selection_results.append((model_name, 'LassoCV', features, rmse))
 
 # Print feature selection results:
 print('\nFeature selection results:')
@@ -219,20 +239,43 @@ for model_name in ['Original', 'Zero intercept']:
     print(f"Max absolute error: {selected['test_max_absolute_error']:.4f} W")
 
 
-# Compare both selected intercept cases on the same residual plots:
-residuals_by_model = {}
+# Print the exact learned polynomial equations for both selected models:
 for model_name, selected in selected_models.items():
     fitted = selected['estimator']
     features = selected['features']
     if selected['method'] == 'LassoCV':
-        predictions = fitted.predict(test_features)
+        scaler = fitted.named_steps['standardscaler']
+        lasso_cv = fitted.named_steps['lassocv']
+        # Unscale coefficients back to raw polynomial units:
+        raw_coefs = lasso_cv.coef_ / scaler.scale_
+        intercept = (
+            lasso_cv.intercept_ - np.sum(raw_coefs * scaler.mean_)
+            if model_name == 'Original' else 0.0
+        )
+        terms = [f"{c:+.4f}*{f}" for f, c in zip(X.columns, raw_coefs) if abs(c) > 1e-8]
     else:
-        predictions = fitted.predict(test_features[features])
-    residuals_by_model[model_name] = y_test - predictions
+        coefs = fitted.coef_
+        intercept = fitted.intercept_ if model_name == 'Original' else 0.0
+        terms = [f"{c:+.4f}*{f}" for f, c in zip(features, coefs)]
 
-for column, xlabel in [
-    ('flow_m3_h', 'Flow (m³/h)'),
-    ('speed_krpm', 'Speed (kRPM)')
+    eq = f"P = {intercept:.4f} " + " ".join(terms)
+    print(f"\n{model_name} Equation:\n{eq}")
+
+
+# Compare both selected intercept cases on the same residual plots:
+residuals_by_model = {}
+predictions_by_model = {}
+for model_name, selected in selected_models.items():
+    fitted = selected['estimator']
+    features = selected['features']
+    preds = (fitted.predict(test_features) if selected['method'] == 'LassoCV'
+             else fitted.predict(test_features[features]))
+    predictions_by_model[model_name] = preds
+    residuals_by_model[model_name] = y_test - preds
+
+for column, xlabel, fname in [
+    ('flow_m3_h', 'Flow (m³/h)', 'task0_residuals_vs_flow.png'),
+    ('speed_krpm', 'Speed (kRPM)', 'task0_residuals_vs_speed.png')
 ]:
     plt.figure(figsize=(8, 5))
     for model_name, residuals in residuals_by_model.items():
@@ -243,18 +286,8 @@ for column, xlabel in [
     plt.title(f'Residual comparison vs {xlabel}')
     plt.legend()
     plt.tight_layout()
+    plt.savefig(fig_p / fname, dpi=300)
     plt.show()
-
-
-# Predictions for the two selected models:
-predictions_by_model = {}
-for model_name, selected in selected_models.items():
-    fitted = selected['estimator']
-    features = selected['features']
-    if selected['method'] == 'LassoCV':
-        predictions_by_model[model_name] = fitted.predict(test_features)
-    else:
-        predictions_by_model[model_name] = fitted.predict(test_features[features])
 
 # Actual vs predicted power (both models):
 plt.figure(figsize=(7, 6))
@@ -268,6 +301,7 @@ plt.ylabel('Predicted power (W)')
 plt.title('Actual vs predicted power')
 plt.legend()
 plt.tight_layout()
+plt.savefig(fig_p / 'task0_actual_vs_predicted.png', dpi=300)
 plt.show()
 
 # CV RMSE vs number of features (all selection methods):
@@ -285,6 +319,7 @@ plt.ylabel('5-fold CV RMSE (W)')
 plt.title('Prediction error vs model complexity')
 plt.legend()
 plt.tight_layout()
+plt.savefig(fig_p / 'task0_cv_rmse_vs_complexity.png', dpi=300)
 plt.show()
 
 # Residual distributions (both models):
@@ -297,6 +332,7 @@ plt.ylabel('Density')
 plt.title('Residual distributions')
 plt.legend()
 plt.tight_layout()
+plt.savefig(fig_p / 'task0_residual_distributions.png', dpi=300)
 plt.show()
 
 # Residuals vs predicted power (both models):
@@ -310,4 +346,5 @@ plt.ylabel('Residual (W)')
 plt.title('Residuals vs predicted power')
 plt.legend()
 plt.tight_layout()
+plt.savefig(fig_p / 'task0_residuals_vs_predicted.png', dpi=300)
 plt.show()
